@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Epic Shooter Web Game</title>
+<style>
+  body {
+    margin: 0; 
+    background: #121212;
+    color: #eee;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  #gameCanvas {
+    background: linear-gradient(135deg, #0d0d0d 0%, #202020 100%);
+    display: block;
+    margin: 0 auto;
+    border: 2px solid #444;
+    box-shadow: 0 0 20px #09f;
+  }
+  #hud {
+    position: fixed;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 20px;
+    text-align: center;
+    user-select: none;
+  }
+  #message {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #f55;
+    font-size: 48px;
+    font-weight: bold;
+    text-shadow: 0 0 10px #f00;
+    display: none;
+    pointer-events: none;
+  }
+  #instructions {
+    position: fixed;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 14px;
+    color: #888;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas" width="800" height="600"></canvas>
+<div id="hud">Health: 3 | Lives: 3 | Score: 0 | Level: 1</div>
+<div id="message"></div>
+<div id="instructions">Move: Arrow Keys or WASD | Shoot: Space or Click | Pause: P</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const messageEl = document.getElementById('message');
+
+  // Game Constants
+  const PLAYER_SIZE = 40;
+  const PLAYER_SPEED = 5;
+  const BULLET_SPEED = 10;
+  const ENEMY_SIZE = 30;
+  const ENEMY_SPEED_BASE = 2;
+  const POWERUP_SIZE = 25;
+  const POWERUP_DURATION = 10000; // 10 seconds
+
+  // Game Variables
+  let keys = {};
+  let mouse = { x: 0, y: 0, down: false };
+
+  let player = {
+    x: canvas.width / 2 - PLAYER_SIZE / 2,
+    y: canvas.height - PLAYER_SIZE - 10,
+    width: PLAYER_SIZE,
+    height: PLAYER_SIZE,
+    health: 3,
+    lives: 3,
+    speed: PLAYER_SPEED,
+    shield: false,
+    shieldTimer: 0,
+  };
+
+  let bullets = [];
+  let enemies = [];
+  let powerups = [];
+  let score = 0;
+  let level = 1;
+  let gameOver = false;
+  let paused = false;
+  let lastEnemySpawn = 0;
+  let enemySpawnInterval = 1500; // ms, decreases with level
+
+  let lastFrameTime = performance.now();
+
+  // Sounds setup (simple beeps with Web Audio API)
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioCtx();
+
+  function playSound(freq, duration=100, type='square') {
+    let osc = audioCtx.createOscillator();
+    let gainNode = audioCtx.createGain();
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration / 1000);
+  }
+
+  // Controls handlers
+  window.addEventListener('keydown', e => {
+    if (e.repeat) return;
+    keys[e.key.toLowerCase()] = true;
+
+    // Pause toggle
+    if (e.key.toLowerCase() === 'p') {
+      paused = !paused;
+      if (!paused && !gameOver) {
+        messageEl.style.display = 'none';
+        lastFrameTime = performance.now();
+        requestAnimationFrame(gameLoop);
+      } else {
+        messageEl.style.display = 'block';
+        messageEl.textContent = paused ? 'PAUSED' : '';
+      }
+    }
+
+    // Restart on game over
+    if (gameOver && e.key.toLowerCase() === 'r') {
+      restartGame();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    keys[e.key.toLowerCase()] = false;
+  });
+
+  canvas.addEventListener('mousedown', e => {
+    mouse.down = true;
+    shootBullet();
+  });
+  canvas.addEventListener('mouseup', e => {
+    mouse.down = false;
+  });
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = e.clientX - rect.left;
+    mouse.y = e.clientY - rect.top;
+  });
+
+  // Game functions
+  function restartGame() {
+    player.x = canvas.width / 2 - PLAYER_SIZE / 2;
+    player.y = canvas.height - PLAYER_SIZE - 10;
+    player.health = 3;
+    player.lives = 3;
+    player.shield = false;
+    player.shieldTimer = 0;
+    bullets = [];
+    enemies = [];
+    powerups = [];
+    score = 0;
+    level = 1;
+    gameOver = false;
+    paused = false;
+    lastEnemySpawn = 0;
+    enemySpawnInterval = 1500;
+    hud.textContent = getHUDText();
+    messageEl.style.display = 'none';
+    lastFrameTime = performance.now();
+    requestAnimationFrame(gameLoop);
+  }
+
+  function getHUDText() {
+    return `Health: ${player.health} | Lives: ${player.lives} | Score: ${score} | Level: ${level}`;
+  }
+
+  function drawPlayer() {
+    ctx.save();
+    // Shield glow
+    if (player.shield) {
+      ctx.shadowColor = 'cyan';
+      ctx.shadowBlur = 20;
+    }
+    ctx.fillStyle = '#00ffff';
+    ctx.fillRect(player.x, player.y, player.width, player.height);
+    // Draw a simple player face (eyes)
+    ctx.fillStyle = '#000';
+    ctx.fillRect(player.x + 10, player.y + 10, 8, 8);
+    ctx.fillRect(player.x + 22, player.y + 10, 8, 8);
+    ctx.restore();
+  }
+
+  function drawBullet(bullet) {
+    ctx.fillStyle = '#ff5555';
+    ctx.beginPath();
+    ctx.arc(bullet.x, bullet.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawEnemy(enemy) {
+    ctx.fillStyle = '#ff0000';
+    ctx.beginPath();
+    ctx.arc(enemy.x, enemy.y, ENEMY_SIZE / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPowerup(powerup) {
+    ctx.fillStyle = powerup.type === 'shield' ? '#0ff' : powerup.type === 'health' ? '#0f0' : '#ff0';
+    ctx.beginPath();
+    ctx.rect(powerup.x - POWERUP_SIZE/2, powerup.y - POWERUP_SIZE/2, POWERUP_SIZE, POWERUP_SIZE);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 16px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(powerup.type.charAt(0).toUpperCase(), powerup.x, powerup.y);
+  }
+
+  function movePlayer(delta) {
+    let moveX = 0, moveY = 0;
+    if (keys['arrowleft'] || keys['a']) moveX -= 1;
+    if (keys['arrowright'] || keys['d']) moveX += 1;
+    if (keys['arrowup'] || keys['w']) moveY -= 1;
+    if (keys['arrowdown'] || keys['s']) moveY += 1;
+
+    let length = Math.sqrt(moveX * moveX + moveY * moveY);
+    if (length > 0) {
+      moveX /= length;
+      moveY /= length;
+    }
+
+    player.x += moveX * player.speed;
+    player.y += moveY * player.speed;
+
+    // Boundaries
+    player.x = Math.max(0, Math.min(canvas.width - player.width, player.x));
+    player.y = Math.max(0, Math.min(canvas.height - player.height, player.y));
+  }
+
+  function shootBullet() {
+    if (gameOver || paused) return;
+
+    // Limit rate of fire with cooldown
+    if (player.lastShot && performance.now() - player.lastShot < 200) return;
+
+    bullets.push({
+      x: player.x + player.width / 2,
+      y: player.y,
+      speed: BULLET_SPEED
+    });
+    player.lastShot = performance.now();
+    playSound(600, 100, 'square');
+  }
+
+  function moveBullets(delta) {
+    bullets = bullets.filter(bullet => bullet.y > -10);
+    bullets.forEach(bullet => {
+      bullet.y -= bullet.speed;
+    });
+  }
+
+  function spawnEnemy() {
+    if (gameOver || paused) return;
+
+    let now = performance.now();
+    if (now - lastEnemySpawn < enemySpawnInterval) return;
+
+    lastEnemySpawn = now;
+    let x = Math.random() * (canvas.width - ENEMY_SIZE) + ENEMY_SIZE / 2;
+    enemies.push({
+      x,
+      y: -ENEMY_SIZE,
+      speed: ENEMY_SPEED_BASE + level * 0.3,
+      size: ENEMY_SIZE,
+      direction: Math.random() < 0.5 ? -1 : 1, // zigzag movement
+      zigzagOffset: 0,
+    });
+  }
+
+  function moveEnemies(delta) {
+    enemies.forEach(enemy => {
+      enemy.y += enemy.speed;
+      enemy.zigzagOffset += 0.05;
+      enemy.x += enemy.direction * Math.sin(enemy.zigzagOffset) * 2;
+
+      // Keep inside canvas horizontally
+      if (enemy.x < enemy.size / 2) {
+        enemy.x = enemy.size / 2;
+        enemy.direction *= -1;
+      }
+      if (enemy.x > canvas.width - enemy.size / 2) {
+        enemy.x = canvas.width - enemy.size / 2;
+        enemy.direction *= -1;
+      }
+    });
+
+    enemies = enemies.filter(enemy => enemy.y < canvas.height + enemy.size);
+  }
+
+  function spawnPowerup() {
+    if (gameOver || paused) return;
+
+    // 1% chance every frame to spawn a powerup
+    if (Math.random() < 0.01) {
+      let types = ['shield', 'health', 'speed'];
+      let type = types[Math.floor(Math.random() * types.length)];
+      powerups.push({
+        x: Math.random() * (canvas.width - POWERUP_SIZE) + POWERUP_SIZE / 2,
+        y: -POWERUP_SIZE,
+        type,
+        speed: 2
+      });
+    }
+  }
+
+  function movePowerups(delta) {
+    powerups.forEach(p => {
+      p.y += p.speed;
+    });
+
+    powerups = powerups.filter(p => p.y < canvas.height + POWERUP_SIZE);
+  }
+
+  function checkCollisions() {
+    // Bullet hits enemy
+    bullets = bullets.filter(bullet => {
+      for (let i = 0; i < enemies.length; i++) {
+        let e = enemies[i];
+        let dx = bullet.x - e.x;
+        let dy = bullet.y - e.y;
+        let dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < ENEMY_SIZE / 2 + 5) {
+          enemies.splice(i, 1);
+          score += 10;
+          playSound(900, 80, 'triangle');
+          updateLevel();
+          return false; // remove bullet
+        }
+      }
+      return true;
+    });
+
+    // Enemy hits player
+    enemies = enemies.filter(enemy => {
+      let dx = player.x + player.width / 2 - enemy.x;
+      let dy = player.y + player.height / 2 - enemy.y;
+      let dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist < ENEMY_SIZE / 2 + Math.min(player.width, player.height) / 2) {
+        if (player.shield) {
+          playSound(400, 100, 'sine');
+          player.shield = false;
+        } else {
+          player.health -= 1;
+          playSound(300, 200, 'sawtooth');
+          if (player.health <= 0) {
+            player.lives -= 1;
+            player.health = 3;
+            if (player.lives <= 0) {
+              endGame();
+            }
+          }
+        }
+        return false; // enemy destroyed on hit
+      }
+      return true;
+    });
+
+    // Player picks powerup
+    powerups = powerups.filter(powerup => {
+      let dx = player.x + player.width / 2 - powerup.x;
+      let dy = player.y + player.height / 2 - powerup.y;
+      let dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist < POWERUP_SIZE / 2 + Math.min(player.width, player.height) / 2) {
+        applyPowerup(powerup.type);
+        playSound(1000, 150, 'square');
+        return false;
+      }
+      return true;
+    });
+  }
+
+  function applyPowerup(type) {
+    if (type === 'shield') {
+      player.shield = true;
+      player.shieldTimer = performance.now();
+    } else if (type === 'health') {
+      player.health = Math.min(player.health + 1, 5);
+    } else if (type === 'speed') {
+      player.speed = PLAYER_SPEED * 1.5;
+      setTimeout(() => {
+        player.speed = PLAYER_SPEED;
+      }, POWERUP_DURATION);
+    }
+  }
+
+  function updateLevel() {
+    let newLevel = Math.floor(score / 100) + 1;
+    if (newLevel > level) {
+      level = newLevel;
+      enemySpawnInterval = Math.max(500, 1500 - (level - 1) * 100);
+      showMessage(`LEVEL UP! ${level}`, 2000);
+      playSound(1200, 200, 'triangle');
+    }
+  }
+
+  function endGame() {
+    gameOver = true;
+    messageEl.style.display = 'block';
+    messageEl.textContent = 'GAME OVER - PRESS R TO RESTART';
+    playSound(100, 1000, 'sawtooth');
+  }
+
+  function showMessage(text, duration=1500) {
+    messageEl.style.display = 'block';
+    messageEl.textContent = text;
+    setTimeout(() => {
+      if (!gameOver && !paused) {
+        messageEl.style.display = 'none';
+      }
+    }, duration);
+  }
+
+  function updateHUD() {
+    hud.textContent = getHUDText();
+  }
+
+  function gameLoop(timestamp) {
+    if (paused || gameOver) return;
+
+    const delta = timestamp - lastFrameTime;
+    lastFrameTime = timestamp;
+
+    // Clear
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Move & update
+    movePlayer(delta);
+    moveBullets(delta);
+    spawnEnemy();
+    moveEnemies(delta);
+    spawnPowerup();
+    movePowerups(delta);
+    checkCollisions();
+
+    // Draw
+    drawPlayer();
+    bullets.forEach(drawBullet);
+    enemies.forEach(drawEnemy);
+    powerups.forEach(drawPowerup);
+
+    updateHUD();
+
+    // Auto shoot if mouse down
+    if (mouse.down) shootBullet();
+
+    requestAnimationFrame(gameLoop);
+  }
+
+  // Start game
+  restartGame();
+
+})();
+</script>
+
+</body>
+</html>
